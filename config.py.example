@@ -1,0 +1,12 @@
+# config.py
+
+USER_TOKENS = {
+    'Bearer your token1': {
+        'username': 'User1',
+        'default_account_id': 1
+    },
+    'Bearer your token2': {
+        'username': 'User2',
+        'default_account_id': 2
+    }
+}

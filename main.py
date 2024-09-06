@@ -4,6 +4,8 @@ from datetime import datetime
 from sqlalchemy.sql import expression
 from sqlalchemy import func
 from sqlalchemy.orm import aliased
+from functools import wraps
+from config import USER_TOKENS
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///personal_finance.db'
@@ -71,7 +73,19 @@ class ExchangeRate(db.Model):
 with app.app_context():
     db.create_all()
 
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        if not token:
+            return jsonify({'message': 'Token is missing!'}), 401
+        if token not in USER_TOKENS:
+            return jsonify({'message': 'Invalid token!'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
 # 路由和视图函数
+@token_required
 @app.route('/category', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def category_operations():
     if request.method == 'GET':
@@ -115,6 +129,7 @@ def category_operations():
         db.session.commit()
         return jsonify({'message': 'Category deleted successfully'})
 
+@token_required
 @app.route('/categories/hierarchical', methods=['GET'])
 def get_hierarchical_categories():
     category_type = request.args.get('type')  # 可以是 'income' 或 'expense'
@@ -150,7 +165,8 @@ def get_hierarchical_categories():
 
     # 转换为列表并返回
     return jsonify(list(categories.values()))
-    
+
+@token_required   
 @app.route('/account', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def account_operations():
     if request.method == 'GET':
@@ -185,7 +201,8 @@ def account_operations():
         account.is_deleted = True
         db.session.commit()
         return jsonify({'message': 'Account deleted successfully'})
-    
+
+@token_required    
 @app.route('/transaction', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def transaction_operations():
     if request.method == 'GET':
@@ -225,19 +242,27 @@ def transaction_operations():
 
     elif request.method == 'POST':
         data = request.json
-        date = datetime.strptime(data['date'], '%Y-%m-%d')
-        account = Account.query.get(data['account_id'])
+        token = request.headers.get('Authorization')
+        user_info = USER_TOKENS[token]
         
-        amount_in_rmb = convert_currency(data['amount'], account.currency, 'CNY', date.date())
+        str_date = data.get('date', None)
+        if str_date:
+            date = datetime.strptime(str_date, '%Y-%m-%d')
+        else:
+            date = datetime.now()
+        account_id = data.get('account_id', user_info['default_account_id'])
+        account = Account.query.get(account_id)
+        
+        # amount_in_rmb = convert_currency(data['amount'], account.currency, 'CNY', date.date())
         
         transaction = Transaction(
             date=date,
-            amount=amount_in_rmb,
+            amount=data['amount'],
             type=data['type'],
             category_id=data['category_id'],
-            account_id=data['account_id'],
+            account_id=account_id,
             description=data.get('description'),
-            created_by=data.get('created_by')
+            created_by=user_info['username']
         )
         db.session.add(transaction)
         
@@ -249,7 +274,6 @@ def transaction_operations():
         
         db.session.commit()
         return jsonify({'message': 'Transaction added successfully', 'id': transaction.id}), 201
-
     elif request.method == 'PUT':
         data = request.json
         transaction = Transaction.query.get_or_404(data['id'])
@@ -295,48 +319,64 @@ def transaction_operations():
         return jsonify({'message': 'Transaction deleted successfully'})
     
 # 统计查询功能
+@token_required
 @app.route('/stats', methods=['GET'])
 def get_stats():
     period = request.args.get('period', 'month')
     start_date = datetime.strptime(request.args.get('start_date'), '%Y-%m-%d')
     end_date = datetime.strptime(request.args.get('end_date'), '%Y-%m-%d')
     
+    # Helper function to get the appropriate strftime format
+    def get_strftime_format(period):
+        if period == 'day':
+            return '%Y-%m-%d'
+        elif period == 'week':
+            return '%Y-%W'
+        elif period == 'month':
+            return '%Y-%m'
+        elif period == 'year':
+            return '%Y'
+        else:
+            return '%Y-%m-%d'  # default to day if unknown period
+
+    strftime_format = get_strftime_format(period)
+
     # 总资产统计
     total_assets = db.session.query(func.sum(Account.balance)).scalar()
     
     # 收入支出统计
     income_expense = db.session.query(
-        func.date_trunc(period, Transaction.date).label('period'),
+        func.strftime(strftime_format, Transaction.date).label('period'),
         Transaction.type,
         func.sum(Transaction.amount).label('total')
     ).filter(
         Transaction.date.between(start_date, end_date)
     ).group_by(
-        func.date_trunc(period, Transaction.date),
+        func.strftime(strftime_format, Transaction.date),
         Transaction.type
     ).all()
     
     # 分类统计
     category_stats = db.session.query(
-        func.date_trunc(period, Transaction.date).label('period'),
+        func.strftime(strftime_format, Transaction.date).label('period'),
         Category.name,
         func.sum(Transaction.amount).label('total')
     ).join(Category).filter(
         Transaction.date.between(start_date, end_date)
     ).group_by(
-        func.date_trunc(period, Transaction.date),
+        func.strftime(strftime_format, Transaction.date),
         Category.name
     ).all()
     
     # 账户资金统计
     account_stats = db.session.query(
-        func.date_trunc(period, Transaction.date).label('period'),
+        func.strftime(strftime_format, Transaction.date).label('period'),
         Account.name,
         func.sum(Transaction.amount).label('total')
     ).join(Account).filter(
         Transaction.date.between(start_date, end_date)
     ).group_by(
-        func.date_trunc(period, Transaction.date),
+        func.strftime(strftime_format, Transaction.date),
         Account.name
     ).all()
     
